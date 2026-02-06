@@ -1,4 +1,2301 @@
-***RustDesk Server Config***
+# RustDesk with Traefik, Load Balancing, TLS, Watchtower & Portainer
 
-**Replica Deployment**
-https://docs.docker.com/reference/compose-file/deploy/
+Complete Docker Compose setup for RustDesk server with Traefik reverse proxy, automatic HTTPS via Let's Encrypt, load balancing, automatic updates with Watchtower, and Portainer for management.
+
+**Optimized for IONOS VPS deployment with Let's Encrypt HTTP challenge.**
+
+## Table of Contents
+
+- [Overview](#overview)
+- [IONOS VPS Requirements](#ionos-vps-requirements)
+- [Quick Start for IONOS VPS](#quick-start-for-ionos-vps)
+- [Prerequisites](#prerequisites)
+  - [Using tmux for Deployment](#using-tmux-for-deployment)
+- [Directory Structure](#directory-structure)
+- [Configuration Files](#configuration-files)
+  - [docker-compose.yml](#docker-composeyml)
+  - [traefik.yml](#traefikyml)
+  - [config.yml](#configyml)
+  - [.env](#env)
+  - [supporttool Configuration](#supporttool-configuration-files)
+- [Setup Instructions](#setup-instructions)
+- [Service Access](#service-access)
+- [Maintenance](#maintenance)
+  - [tmux Session Management](#tmux-session-management)
+- [Custom Repository Management](#custom-repository-management)
+- [Forking and Building Your Own Repositories](#forking-and-building-your-own-repositories)
+- [Supporttool Files Appendix](#supporttool-files-appendix)
+- [Troubleshooting](#troubleshooting)
+  - [tmux Session Issues](#tmux-session-issues)
+
+---
+
+## Overview
+
+This setup includes:
+
+- **RustDesk Server**: Open-source remote desktop solution (hbbs & hbbr services with 3 replicas each)
+  - **Custom Repository**: Uses `sgpromantis/rustdesk-server` for customized builds
+- **Traefik v2.10**: Reverse proxy with automatic HTTPS/TLS
+- **Let's Encrypt**: Free SSL/TLS certificates with automatic renewal (HTTP-01 challenge)
+- **Load Balancing**: Distributes traffic across RustDesk replicas
+- **Watchtower**: Automatic container updates with rolling restart (monitors custom repository)
+- **Portainer**: Web-based Docker management interface
+- **Support Tool**: Public file server for hosting custom RustDesk installers and scripts
+- **Rolling Updates**: Zero-downtime deployments
+
+### Custom RustDesk Repository
+
+This configuration uses the custom RustDesk server image from `sgpromantis/rustdesk-server:latest` instead of the official `rustdesk/rustdesk-server:latest`. This allows you to:
+
+- Deploy your own customized builds
+- Control update timing through your own repository
+- Add custom features or modifications
+- Test changes before deploying to production
+
+Watchtower is configured to monitor your custom repository and automatically pull updates when you push new images to `sgpromantis/rustdesk-server:latest`.
+
+---
+
+## IONOS VPS Requirements
+
+### Minimum Specifications
+
+- **VPS Plan**: VPS M or higher recommended
+- **RAM**: 4GB minimum (8GB recommended for 3 replicas)
+- **CPU**: 2 vCPU minimum
+- **Storage**: 40GB SSD minimum
+- **OS**: Ubuntu 22.04 LTS (recommended) or Debian 11+
+
+### Network Requirements
+
+- **Public IPv4 Address**: Required (included with all IONOS VPS)
+- **Domain Name**: Must be managed through IONOS or point to IONOS nameservers
+- **Ports**: 80, 443, 21115-21119 must be accessible
+
+### IONOS-Specific Considerations
+
+1. **DNS Management**: Use IONOS DNS panel for A record configuration
+2. **Firewall**: Configure both UFW/firewalld AND IONOS cloud firewall
+3. **Email**: IONOS may restrict outbound SMTP on port 25 (not needed for this setup)
+4. **Backup**: Use IONOS snapshot feature before major changes
+
+---
+
+## Quick Start for IONOS VPS
+
+For experienced users, here's the fast track:
+
+```bash
+# 1. SSH into your IONOS VPS
+ssh root@your-vps-ip
+
+# 2. Start tmux session for continuity
+tmux new -s rustdesk-deploy
+
+# 3. Install Docker and tmux (if not installed)
+curl -fsSL https://get.docker.com | sh
+apt install docker-compose-plugin tmux -y
+
+# 4. Create project directory
+mkdir -p ~/rustdesk-deployment && cd ~/rustdesk-deployment
+
+# 5. Create directory structure
+mkdir -p traefik data portainer-data
+mkdir -p supporttool/installers/{windows,linux,macos,android}
+mkdir -p supporttool/scripts
+touch traefik/acme.json && chmod 600 traefik/acme.json
+
+# 6. Create all config files (docker-compose.yml, traefik.yml, config.yml, .env)
+# See detailed configuration files below
+
+# 7. Configure IONOS DNS A records to point to your VPS IP
+
+# 8. Configure firewall
+ufw allow 22,80,443,21115:21119/tcp
+ufw allow 21116/udp
+ufw enable
+
+# 9. Deploy
+docker compose up -d
+
+# 10. Check logs
+docker compose logs -f
+
+# 11. Detach from tmux (keeps session running)
+# Press: Ctrl+b then d
+
+# 12. Reconnect later with
+# tmux attach -t rustdesk-deploy
+```
+
+For detailed step-by-step instructions, continue reading below.
+
+---
+
+## Prerequisites
+
+### On Your IONOS VPS
+
+- Ubuntu 22.04 LTS or Debian 11+ installed
+- Docker Engine 20.10+
+- Docker Compose v2.0+
+- Root or sudo access
+- Public IPv4 address (provided by IONOS)
+- **tmux** for SSH session continuity
+
+### Domain Configuration
+
+- Domain registered (can be through IONOS or external)
+- Access to DNS management
+- If using external domain: Point nameservers to IONOS or configure A records
+
+### Local Machine
+
+- SSH client to access your VPS
+- Basic knowledge of Linux command line
+
+### Install Docker and tmux on IONOS VPS
+
+If Docker and tmux are not already installed:
+
+```bash
+# Update system
+sudo apt update && sudo apt upgrade -y
+
+# Install tmux for session continuity
+sudo apt install tmux -y
+
+# Install Docker
+curl -fsSL https://get.docker.com -o get-docker.sh
+sudo sh get-docker.sh
+
+# Add your user to docker group (optional, to run docker without sudo)
+sudo usermod -aG docker $USER
+
+# Install Docker Compose
+sudo apt install docker-compose-plugin -y
+
+# Verify installation
+docker --version
+docker compose version
+tmux -V
+```
+
+### Using tmux for Deployment
+
+tmux ensures your deployment continues even if your SSH connection drops:
+
+```bash
+# Start a new tmux session
+tmux new -s rustdesk
+
+# Inside tmux, run your deployment commands
+# If disconnected, reconnect with:
+tmux attach -t rustdesk
+
+# Detach from session (keeps it running): Ctrl+b then d
+# List sessions: tmux ls
+# Kill session: tmux kill-session -t rustdesk
+```
+
+**tmux Quick Reference:**
+- `Ctrl+b d` - Detach from session (keeps running)
+- `Ctrl+b c` - Create new window
+- `Ctrl+b n` - Next window
+- `Ctrl+b p` - Previous window
+- `Ctrl+b [` - Scroll mode (q to exit)
+
+---
+
+## Directory Structure
+
+Create the following directory structure:
+
+```
+rustdesk-deployment/
+├── docker-compose.yml
+├── .env
+├── traefik/
+│   ├── traefik.yml
+│   ├── config.yml
+│   └── acme.json (will be created automatically)
+├── data/
+├── portainer-data/
+├── supporttool/
+│   ├── index.html
+│   ├── listing.html (optional - custom directory listing template)
+│   ├── installers/
+│   │   ├── windows/
+│   │   ├── linux/
+│   │   ├── macos/
+│   │   └── android/
+│   └── scripts/
+│       ├── install.sh
+│       ├── install.ps1
+│       └── config.json
+└── README.md
+```
+
+---
+
+## Configuration Files
+
+### docker-compose.yml
+
+```yaml
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+      - "21115:21115"  # RustDesk TCP
+      - "21116:21116"  # RustDesk TCP
+      - "21116:21116/udp"  # RustDesk UDP
+      - "21117:21117"  # RustDesk hbbr
+      - "21118:21118"  # RustDesk TCP
+      - "21119:21119"  # RustDesk TCP
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./traefik/traefik.yml:/traefik.yml:ro
+      - ./traefik/acme.json:/acme.json
+      - ./traefik/config.yml:/config.yml:ro
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.traefik.entrypoints=http"
+      - "traefik.http.routers.traefik.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_USER}:${TRAEFIK_PASSWORD_HASH}"
+      - "traefik.http.middlewares.traefik-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.sslheader.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.routers.traefik.middlewares=traefik-https-redirect"
+      - "traefik.http.routers.traefik-secure.entrypoints=https"
+      - "traefik.http.routers.traefik-secure.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-secure.middlewares=traefik-auth"
+      - "traefik.http.routers.traefik-secure.tls=true"
+      - "traefik.http.routers.traefik-secure.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik-secure.service=api@internal"
+    networks:
+      - proxy
+
+  hbbr:
+    image: sgpromantis/rustdesk-server:latest
+    deploy:
+      mode: replicated
+      replicas: 3
+      endpoint_mode: vip
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    command: hbbr
+    volumes:
+      - ./data:/root
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.hbbr.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.hbbr.entrypoints=hbbr"
+      - "traefik.tcp.routers.hbbr.service=hbbr"
+      - "traefik.tcp.services.hbbr.loadbalancer.server.port=21117"
+      - "com.centurylinklabs.watchtower.enable=true"
+    restart: unless-stopped
+
+  hbbs:
+    image: sgpromantis/rustdesk-server:latest
+    deploy:
+      mode: replicated
+      replicas: 3
+      endpoint_mode: vip
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    command: hbbs -r hbbr:21117
+    volumes:
+      - ./data:/root
+    networks:
+      - proxy
+    depends_on:
+      - hbbr
+    labels:
+      - "traefik.enable=true"
+      - "traefik.tcp.routers.hbbs-tcp.rule=HostSNI(`*`)"
+      - "traefik.tcp.routers.hbbs-tcp.entrypoints=hbbs-tcp"
+      - "traefik.tcp.routers.hbbs-tcp.service=hbbs-tcp"
+      - "traefik.tcp.services.hbbs-tcp.loadbalancer.server.port=21115"
+      - "traefik.udp.routers.hbbs-udp.entrypoints=hbbs-udp"
+      - "traefik.udp.routers.hbbs-udp.service=hbbs-udp"
+      - "traefik.udp.services.hbbs-udp.loadbalancer.server.port=21116"
+      - "com.centurylinklabs.watchtower.enable=true"
+    restart: unless-stopped
+
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portainer
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./portainer-data:/data
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.portainer.entrypoints=http"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)"
+      - "traefik.http.middlewares.portainer-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.portainer.middlewares=portainer-https-redirect"
+      - "traefik.http.routers.portainer-secure.entrypoints=https"
+      - "traefik.http.routers.portainer-secure.rule=Host(`portainer.${DOMAIN}`)"
+      - "traefik.http.routers.portainer-secure.tls=true"
+      - "traefik.http.routers.portainer-secure.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.portainer-secure.service=portainer"
+      - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+      - "traefik.docker.network=proxy"
+
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: watchtower
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - WATCHTOWER_CLEANUP=true
+      - WATCHTOWER_LABEL_ENABLE=true
+      - WATCHTOWER_INCLUDE_RESTARTING=true
+      - WATCHTOWER_ROLLING_RESTART=true
+      - WATCHTOWER_POLL_INTERVAL=60  # Check every 60 seconds
+      # - WATCHTOWER_SCHEDULE=0 0 4 * * *  # Disabled in favor of poll interval
+      # Uncomment below if sgpromantis/rustdesk-server is a private repository:
+      # - REPO_USER=${DOCKER_HUB_USER}
+      # - REPO_PASS=${DOCKER_HUB_PASS}
+    networks:
+      - proxy
+
+  supporttool:
+    image: halverneus/static-file-server:latest
+    container_name: supporttool
+    restart: unless-stopped
+    environment:
+      - FOLDER=/web
+      - PORT=8080
+      - SHOW_LISTING=true
+      - LISTING_TEMPLATE=/web/listing.html
+    volumes:
+      - ./supporttool:/web:ro
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.supporttool.entrypoints=http"
+      - "traefik.http.routers.supporttool.rule=Host(`supporttool.${DOMAIN}`)"
+      - "traefik.http.middlewares.supporttool-https-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.supporttool.middlewares=supporttool-https-redirect"
+      - "traefik.http.routers.supporttool-secure.entrypoints=https"
+      - "traefik.http.routers.supporttool-secure.rule=Host(`supporttool.${DOMAIN}`)"
+      - "traefik.http.routers.supporttool-secure.tls=true"
+      - "traefik.http.routers.supporttool-secure.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.supporttool-secure.service=supporttool"
+      - "traefik.http.services.supporttool.loadbalancer.server.port=8080"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    driver: bridge
+    name: proxy
+```
+
+**Note:** The configuration uses `sgpromantis/rustdesk-server:latest` as the custom RustDesk image. If your repository is private, uncomment the `REPO_USER` and `REPO_PASS` environment variables in the watchtower service and add your Docker Hub credentials to the `.env` file.
+
+The `supporttool` service uses a lightweight static file server (no nginx) that integrates perfectly with Traefik for hosting your custom RustDesk client installers and scripts at `https://supporttool.yourdomain.com`.
+
+The `supporttool` service provides a simple file server for hosting your custom RustDesk client installers and scripts at `https://supporttool.yourdomain.com`.
+
+---
+
+### traefik.yml
+
+Create this file at `./traefik/traefik.yml`:
+
+```yaml
+api:
+  dashboard: true
+  debug: true
+
+entryPoints:
+  http:
+    address: ":80"
+    http:
+      redirections:
+        entryPoint:
+          to: https
+          scheme: https
+  https:
+    address: ":443"
+    http:
+      tls:
+        certResolver: letsencrypt
+  hbbs-tcp:
+    address: ":21115"
+  hbbs-udp:
+    address: ":21116/udp"
+  hbbr:
+    address: ":21117"
+
+serversTransport:
+  insecureSkipVerify: true
+
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: proxy
+  file:
+    filename: /config.yml
+
+certificatesResolvers:
+  letsencrypt:
+    acme:
+      email: ${ACME_EMAIL}
+      storage: acme.json
+      httpChallenge:
+        entryPoint: http
+
+log:
+  level: INFO
+
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  bufferingSize: 100
+```
+
+---
+
+### config.yml
+
+Create this file at `./traefik/config.yml`:
+
+```yaml
+http:
+  middlewares:
+    security-headers:
+      headers:
+        frameDeny: true
+        sslRedirect: true
+        browserXssFilter: true
+        contentTypeNosniff: true
+        forceSTSHeader: true
+        stsIncludeSubdomains: true
+        stsPreload: true
+        stsSeconds: 31536000
+        customFrameOptionsValue: "SAMEORIGIN"
+
+    rate-limit:
+      rateLimit:
+        average: 100
+        burst: 50
+```
+
+---
+
+### .env
+
+Create this file at `./.env`:
+
+```env
+# Domain Configuration
+DOMAIN=yourdomain.com
+
+# Let's Encrypt Configuration
+ACME_EMAIL=your-email@example.com
+
+# Traefik Dashboard Authentication
+TRAEFIK_USER=admin
+TRAEFIK_PASSWORD_HASH=<htpasswd_hash>
+
+# Docker Hub Authentication (Optional - only needed if sgpromantis/rustdesk-server is private)
+# DOCKER_HUB_USER=your_dockerhub_username
+# DOCKER_HUB_PASS=your_dockerhub_password_or_token
+```
+
+**Note:** If your `sgpromantis/rustdesk-server` repository is private:
+1. Uncomment the `REPO_USER` and `REPO_PASS` lines in the watchtower service in `docker-compose.yml`
+2. Uncomment and fill in the `DOCKER_HUB_USER` and `DOCKER_HUB_PASS` values above
+3. Use a Docker Hub access token instead of your password (more secure)
+
+---
+
+### supporttool Configuration Files
+
+The `supporttool` service hosts your custom RustDesk installers and configuration scripts using a lightweight static file server that integrates directly with Traefik (no nginx required).
+
+#### supporttool/listing.html (Optional - Custom Directory Listing)
+
+Create this file at `./supporttool/listing.html` for custom directory listings:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{.Name}} - Directory Listing</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+        }
+        .header h1 { font-size: 1.8em; }
+        .content { padding: 30px; }
+        .breadcrumb {
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        .breadcrumb a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th {
+            background: #f8f9fa;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid #e0e0e0;
+        }
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        tr:hover { background: #f8f9fa; }
+        a {
+            color: #667eea;
+            text-decoration: none;
+        }
+        a:hover { text-decoration: underline; }
+        .icon { margin-right: 8px; }
+        .size { color: #666; }
+        .date { color: #666; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>📁 {{.Name}}</h1>
+        </div>
+        <div class="content">
+            <div class="breadcrumb">
+                <a href="/">🏠 Home</a> / {{.Name}}
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Size</th>
+                        <th>Modified</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {{if .Parent}}
+                    <tr>
+                        <td><a href="{{.Parent}}"><span class="icon">⬆️</span>Parent Directory</a></td>
+                        <td class="size">-</td>
+                        <td class="date">-</td>
+                    </tr>
+                    {{end}}
+                    {{range .Items}}
+                    <tr>
+                        <td>
+                            <a href="{{.URL}}">
+                                <span class="icon">{{if .IsDir}}📁{{else}}📄{{end}}</span>
+                                {{.Name}}
+                            </a>
+                        </td>
+                        <td class="size">{{if not .IsDir}}{{.Size}}{{else}}-{{end}}</td>
+                        <td class="date">{{.ModTime}}</td>
+                    </tr>
+                    {{end}}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+```
+
+For the complete `index.html` file with a beautiful web interface and installation scripts, [see the full supporttool configuration in the appendix](#supporttool-files-appendix).
+
+---
+
+## Setup Instructions
+
+### 1. Create Directory Structure
+
+```bash
+mkdir -p rustdesk-deployment/traefik rustdesk-deployment/data rustdesk-deployment/portainer-data
+mkdir -p rustdesk-deployment/supporttool/installers/{windows,linux,macos,android}
+mkdir -p rustdesk-deployment/supporttool/scripts
+cd rustdesk-deployment
+```
+
+### 2. Create Configuration Files
+
+Create all the configuration files listed above in their respective locations.
+
+**For supporttool**, see the [Supporttool Files Appendix](#supporttool-files-appendix) section for complete file templates.
+
+### 3. Create acme.json File
+
+```bash
+touch traefik/acme.json
+chmod 600 traefik/acme.json
+```
+
+### 4. Generate Password Hash for Traefik
+
+Install `htpasswd` if not already available:
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install apache2-utils
+
+# CentOS/RHEL
+sudo yum install httpd-tools
+
+# macOS
+brew install httpd
+```
+
+Generate the password hash:
+
+```bash
+echo $(htpasswd -nb admin your_secure_password) | sed -e s/\\$/\\$\\$/g
+```
+
+Copy the output and add it to your `.env` file as `TRAEFIK_PASSWORD_HASH`.
+
+### 5. Update .env File
+
+Edit the `.env` file with your actual values:
+
+- Replace `yourdomain.com` with your IONOS domain
+- Replace `your-email@example.com` with your email for Let's Encrypt notifications
+- Add the generated password hash from step 4
+
+### 6. Configure DNS in IONOS
+
+In your IONOS control panel, configure DNS A records:
+
+1. Log into your IONOS account
+2. Go to Domains & SSL → Select your domain
+3. Click "DNS" settings
+4. Add the following A records pointing to your VPS IP:
+
+   | Type | Hostname | Points to | TTL |
+   |------|----------|-----------|-----|
+   | A | traefik | Your VPS IP | 3600 |
+   | A | portainer | Your VPS IP | 3600 |
+   | A | supporttool | Your VPS IP | 3600 |
+   | A | @ (root) | Your VPS IP | 3600 |
+
+   Or use a wildcard record:
+   | Type | Hostname | Points to | TTL |
+   |------|----------|-----------|-----|
+   | A | * | Your VPS IP | 3600 |
+
+5. Wait 5-10 minutes for DNS propagation
+
+### 7. Configure IONOS VPS Firewall
+
+IONOS VPS typically uses UFW (Ubuntu) or firewalld (CentOS). Configure based on your OS:
+
+**For Ubuntu/Debian (UFW):**
+
+```bash
+# Check if UFW is active
+sudo ufw status
+
+# Allow SSH first (important!)
+sudo ufw allow 22/tcp
+
+# Allow required ports
+sudo ufw allow 80/tcp comment 'HTTP for Let''s Encrypt'
+sudo ufw allow 443/tcp comment 'HTTPS'
+sudo ufw allow 21115:21119/tcp comment 'RustDesk TCP'
+sudo ufw allow 21116/udp comment 'RustDesk UDP'
+
+# Enable UFW if not already enabled
+sudo ufw enable
+
+# Verify rules
+sudo ufw status numbered
+```
+
+**For CentOS/RHEL (firewalld):**
+
+```bash
+# Check if firewalld is running
+sudo systemctl status firewalld
+
+# Allow required ports
+sudo firewall-cmd --permanent --add-port=22/tcp
+sudo firewall-cmd --permanent --add-port=80/tcp
+sudo firewall-cmd --permanent --add-port=443/tcp
+sudo firewall-cmd --permanent --add-port=21115-21119/tcp
+sudo firewall-cmd --permanent --add-port=21116/udp
+
+# Apply changes
+sudo firewall-cmd --reload
+
+# Verify rules
+sudo firewall-cmd --list-all
+```
+
+**Note for IONOS VPS:** IONOS may have a cloud firewall in addition to the VPS firewall. Check your IONOS control panel under "Security" or "Firewall" settings to ensure these ports are also allowed at the cloud level.
+
+### 8. Start tmux Session (Recommended)
+
+Before deploying, start a tmux session to ensure your deployment continues even if SSH disconnects:
+
+```bash
+# Start new tmux session
+tmux new -s rustdesk-deploy
+
+# Now you're inside tmux. Your session will persist even if SSH disconnects.
+```
+
+**tmux Basic Commands:**
+- Detach: `Ctrl+b` then `d` (session keeps running)
+- Reattach: `tmux attach -t rustdesk-deploy`
+- List sessions: `tmux ls`
+- Kill session: `tmux kill-session -t rustdesk-deploy`
+
+### 9. Deploy the Stack
+
+```bash
+docker-compose up -d
+```
+
+### 10. Verify Deployment
+
+Check if all containers are running:
+
+```bash
+docker-compose ps
+```
+
+Check logs (stay in tmux to monitor):
+
+```bash
+docker-compose logs -f
+```
+
+**To exit logs:** Press `Ctrl+C`
+
+**To detach from tmux** (keeps everything running):
+Press `Ctrl+b` then `d`
+
+**To reconnect later:**
+```bash
+tmux attach -t rustdesk-deploy
+```
+
+---
+
+## Service Access
+
+Once deployed, access your services at:
+
+- **Traefik Dashboard**: `https://traefik.yourdomain.com`
+  - Username: `admin`
+  - Password: The password you used to generate the hash
+
+- **Portainer**: `https://portainer.yourdomain.com`
+  - First-time setup: Create admin account on first visit
+
+- **Support Tool**: `https://supporttool.yourdomain.com`
+  - Public access for downloading custom RustDesk installers
+  - Provides one-line install commands and configuration scripts
+
+- **RustDesk Server**:
+  - Configure your RustDesk clients to use:
+    - Server: `yourdomain.com` (or your server IP)
+    - Ports: 21115-21119 (default)
+
+---
+
+## RustDesk Client Configuration
+
+1. Open RustDesk client
+2. Click the menu (three dots) next to your ID
+3. Select "ID/Relay Server"
+4. Enter your server details:
+   - **ID Server**: `yourdomain.com:21116`
+   - **Relay Server**: `yourdomain.com:21117`
+   - **API Server**: `https://yourdomain.com` (optional)
+   - **Key**: Found in `./data/id_ed25519.pub` on your server
+
+To get your public key:
+
+```bash
+cat data/id_ed25519.pub
+```
+
+---
+
+## Maintenance
+
+### tmux Session Management
+
+For long-running operations or monitoring, use tmux:
+
+```bash
+# Create named sessions for different tasks
+tmux new -s monitoring    # For watching logs
+tmux new -s maintenance   # For updates/changes
+tmux new -s build         # For building custom images
+
+# List all active sessions
+tmux ls
+
+# Attach to specific session
+tmux attach -t monitoring
+
+# Switch between sessions (while inside tmux)
+# Ctrl+b then s (shows session list)
+
+# Rename session (while inside)
+# Ctrl+b then $ (then type new name)
+
+# Split panes for multi-tasking
+# Ctrl+b then " (horizontal split)
+# Ctrl+b then % (vertical split)
+# Ctrl+b then arrow keys (navigate panes)
+
+# Close pane: exit or Ctrl+d
+```
+
+**Recommended tmux workflow for RustDesk:**
+
+```bash
+# Terminal 1: Main deployment session
+tmux new -s rustdesk
+cd ~/rustdesk-deployment
+
+# Split into 3 panes
+# Ctrl+b " (split horizontal)
+# Ctrl+b % (split vertical on bottom pane)
+
+# Pane 1: Docker logs
+docker-compose logs -f
+
+# Pane 2: System monitoring
+htop
+
+# Pane 3: Command line for ad-hoc tasks
+# (ready for commands)
+
+# Detach when done: Ctrl+b d
+```
+
+### IONOS VPS Snapshot Before Updates
+
+Before major updates, create an IONOS snapshot:
+
+1. Log into IONOS control panel
+2. Navigate to your VPS
+3. Go to "Snapshots" section
+4. Click "Create Snapshot"
+5. Name it (e.g., "pre-update-2024-02-06")
+6. Wait for completion (5-15 minutes)
+
+### View Logs
+
+```bash
+# All services
+docker-compose logs -f
+
+# Specific service
+docker-compose logs -f traefik
+docker-compose logs -f hbbs
+docker-compose logs -f watchtower
+```
+
+### Update Containers Manually
+
+```bash
+docker-compose pull
+docker-compose up -d
+```
+
+### Restart Services
+
+```bash
+# Restart all services
+docker-compose restart
+
+# Restart specific service
+docker-compose restart traefik
+```
+
+### Stop Services
+
+```bash
+docker-compose down
+```
+
+### Backup Data
+
+```bash
+# Backup RustDesk data
+tar -czf rustdesk-backup-$(date +%Y%m%d).tar.gz data/
+
+# Backup Portainer data
+tar -czf portainer-backup-$(date +%Y%m%d).tar.gz portainer-data/
+
+# Backup Traefik certificates
+tar -czf traefik-backup-$(date +%Y%m%d).tar.gz traefik/acme.json
+```
+
+### IONOS VPS Monitoring
+
+Monitor your VPS resources through IONOS panel:
+
+1. Log into IONOS control panel
+2. Navigate to your VPS
+3. View "Monitoring" section for:
+   - CPU usage
+   - RAM usage
+   - Disk I/O
+   - Network traffic
+
+Or check directly on the VPS:
+
+```bash
+# Check resource usage
+htop
+# or
+docker stats
+
+# Check disk space
+df -h
+
+# Check memory
+free -h
+
+# Check network connections
+netstat -tuln | grep -E '21115|21116|21117|80|443'
+```
+
+---
+
+## Custom Repository Management
+
+### Building and Pushing Updates to Your Repository
+
+When you want to update your RustDesk server with custom changes:
+
+```bash
+# 1. Clone your repository
+git clone https://github.com/sgpromantis/rustdesk-server.git
+cd rustdesk-server
+
+# 2. Make your changes to the code
+
+# 3. Build the Docker image
+docker build -t sgpromantis/rustdesk-server:latest .
+
+# 4. Test locally (optional)
+docker run -d --name test-rustdesk sgpromantis/rustdesk-server:latest hbbs
+docker logs test-rustdesk
+docker rm -f test-rustdesk
+
+# 5. Login to Docker Hub
+docker login
+
+# 6. Push to your repository
+docker push sgpromantis/rustdesk-server:latest
+
+# 7. Tag with version (optional but recommended)
+docker tag sgpromantis/rustdesk-server:latest sgpromantis/rustdesk-server:v1.2.3
+docker push sgpromantis/rustdesk-server:v1.2.3
+```
+
+### Watchtower Automatic Updates
+
+Watchtower checks your custom repository every 24 hours (configurable). When it detects a new image:
+
+1. **Pulls the new image** from `sgpromantis/rustdesk-server:latest`
+2. **Performs rolling restart**:
+   - Stops one replica at a time
+   - Starts new container with updated image
+   - Waits for health check
+   - Moves to next replica
+3. **Maintains availability** - at least 2 replicas remain running during update
+
+### Manual Update Trigger
+
+To force an immediate update check:
+
+```bash
+# Trigger Watchtower to check for updates now
+docker exec watchtower watchtower --run-once
+
+# Or restart Watchtower to trigger immediate check
+docker-compose restart watchtower
+```
+
+### Switching Between Repositories
+
+To switch from your custom repository to official RustDesk or vice versa:
+
+```bash
+# 1. Stop services
+docker-compose down
+
+# 2. Edit docker-compose.yml and change image:
+#    From: sgpromantis/rustdesk-server:latest
+#    To: rustdesk/rustdesk-server:latest
+#    (or vice versa)
+
+# 3. Pull new images
+docker-compose pull
+
+# 4. Start services
+docker-compose up -d
+```
+
+### Version Pinning (Recommended for Production)
+
+Instead of using `:latest`, pin to specific versions:
+
+```yaml
+  hbbs:
+    image: sgpromantis/rustdesk-server:v1.2.3  # Pin to specific version
+    # ... rest of config
+```
+
+This prevents automatic updates and gives you control over when to update:
+
+```bash
+# Update docker-compose.yml with new version tag
+# Then:
+docker-compose pull
+docker-compose up -d
+```
+
+### Monitoring Your Custom Builds
+
+Check which version is running:
+
+```bash
+# View image tags and digests
+docker images | grep rustdesk-server
+
+# Check when images were pulled
+docker inspect sgpromantis/rustdesk-server:latest | grep Created
+
+# View Watchtower update logs
+docker-compose logs watchtower | grep -i update
+```
+
+---
+
+## Forking and Building Your Own Repositories
+
+### Overview
+
+To maintain full control over your RustDesk infrastructure, you can fork all related repositories to your own GitHub account and build from source. This section provides links to fork and instructions for building.
+
+**Watchtower Configuration**: Set to check every 60 seconds for rapid deployment of your custom builds.
+
+### Required Repositories to Fork
+
+Here are all the repositories you should fork to your GitHub account (`sgpromantis`):
+
+#### 1. **RustDesk Server** (Core Server)
+- **Original**: https://github.com/rustdesk/rustdesk-server
+- **Fork to**: https://github.com/sgpromantis/rustdesk-server
+- **Purpose**: Main server components (hbbs and hbbr)
+- **Language**: Rust
+
+#### 2. **RustDesk** (Client Application)
+- **Original**: https://github.com/rustdesk/rustdesk
+- **Fork to**: https://github.com/sgpromantis/rustdesk
+- **Purpose**: Desktop and mobile client applications
+- **Language**: Rust, Dart (Flutter)
+
+#### 3. **RustDesk Server Pro** (Optional - Enterprise Features)
+- **Original**: https://github.com/rustdesk/rustdesk-server-pro
+- **Fork to**: https://github.com/sgpromantis/rustdesk-server-pro
+- **Purpose**: Professional/Enterprise server features
+- **Language**: Rust
+- **Note**: May require license for production use
+
+#### 4. **RustDesk API Server** (Optional - Web Console)
+- **Original**: https://github.com/rustdesk/rustdesk-api-server
+- **Fork to**: https://github.com/sgpromantis/rustdesk-api-server
+- **Purpose**: Web-based management console and API
+- **Language**: Python (FastAPI)
+
+### Quick Fork Commands
+
+Fork all repositories using GitHub CLI:
+
+```bash
+# Install GitHub CLI if not already installed
+# Ubuntu/Debian
+sudo apt install gh
+
+# Login to GitHub
+gh auth login
+
+# Fork repositories to your account
+gh repo fork rustdesk/rustdesk-server --clone=true --remote=true
+gh repo fork rustdesk/rustdesk --clone=true --remote=true
+gh repo fork rustdesk/rustdesk-server-pro --clone=true --remote=true
+gh repo fork rustdesk/rustdesk-api-server --clone=true --remote=true
+
+# Or manually fork via web interface:
+# Visit each URL above and click "Fork" button
+```
+
+### Building RustDesk Server from Your Fork
+
+#### Method 1: Using Docker Compose (Recommended)
+
+Create a build configuration that pulls from your forks:
+
+**docker-compose.build.yml**
+
+```yaml
+version: '3.8'
+
+services:
+  rustdesk-server-build:
+    build:
+      context: https://github.com/sgpromantis/rustdesk-server.git#main
+      dockerfile: Dockerfile
+    image: sgpromantis/rustdesk-server:latest
+    command: echo "Build complete"
+
+  # Alternative: Build from local clone
+  rustdesk-server-build-local:
+    build:
+      context: ./rustdesk-server
+      dockerfile: Dockerfile
+    image: sgpromantis/rustdesk-server:latest
+    command: echo "Build complete"
+```
+
+Build and push:
+
+```bash
+# Build from GitHub directly
+docker-compose -f docker-compose.build.yml build rustdesk-server-build
+
+# Or clone and build locally
+git clone https://github.com/sgpromantis/rustdesk-server.git
+docker-compose -f docker-compose.build.yml build rustdesk-server-build-local
+
+# Tag and push to Docker Hub
+docker tag sgpromantis/rustdesk-server:latest sgpromantis/rustdesk-server:v$(date +%Y%m%d)
+docker push sgpromantis/rustdesk-server:latest
+docker push sgpromantis/rustdesk-server:v$(date +%Y%m%d)
+```
+
+#### Method 2: Manual Docker Build
+
+```bash
+# Clone your fork
+git clone https://github.com/sgpromantis/rustdesk-server.git
+cd rustdesk-server
+
+# Build for your architecture
+docker build -t sgpromantis/rustdesk-server:latest .
+
+# Build for multiple architectures (recommended)
+docker buildx create --use --name multiarch-builder
+docker buildx build \
+  --platform linux/amd64,linux/arm64,linux/arm/v7 \
+  -t sgpromantis/rustdesk-server:latest \
+  -t sgpromantis/rustdesk-server:v$(date +%Y%m%d) \
+  --push .
+
+# Verify
+docker run --rm sgpromantis/rustdesk-server:latest hbbs --help
+```
+
+#### Method 3: Automated CI/CD with GitHub Actions
+
+Create `.github/workflows/build-and-push.yml` in your forked repository:
+
+```yaml
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+env:
+  DOCKER_HUB_USERNAME: sgpromantis
+  IMAGE_NAME: rustdesk-server
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+    
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+    
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v2
+    
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_HUB_USERNAME }}
+        password: ${{ secrets.DOCKER_HUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v4
+      with:
+        images: ${{ env.DOCKER_HUB_USERNAME }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=raw,value=latest
+          type=sha,prefix={{branch}}-
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+    
+    - name: Build and push
+      uses: docker/build-push-action@v4
+      with:
+        context: .
+        platforms: linux/amd64,linux/arm64,linux/arm/v7
+        push: ${{ github.event_name != 'pull_request' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+```
+
+**Setup GitHub Actions:**
+
+1. Go to your forked repository on GitHub
+2. Settings → Secrets and variables → Actions
+3. Add secrets:
+   - `DOCKER_HUB_USERNAME`: sgpromantis
+   - `DOCKER_HUB_TOKEN`: Your Docker Hub access token
+
+Now every push to main branch will automatically build and push to Docker Hub, and Watchtower will deploy it within 60 seconds!
+
+### Building RustDesk Client from Your Fork
+
+```bash
+# Clone your client fork
+git clone https://github.com/sgpromantis/rustdesk.git
+cd rustdesk
+
+# Install dependencies (Ubuntu/Debian)
+sudo apt-get update
+sudo apt-get install -y \
+  g++ gcc git curl wget nasm yasm \
+  libgtk-3-dev clang libxcb-randr0-dev \
+  libxdo-dev libxfixes-dev libxcb-shape0-dev \
+  libxcb-xfixes0-dev libasound2-dev libpulse-dev \
+  cmake libclang-dev ninja-build libgstreamer1.0-dev \
+  libgstreamer-plugins-base1.0-dev libappindicator3-dev
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Install Flutter
+git clone https://github.com/flutter/flutter.git -b stable
+export PATH="$PATH:`pwd`/flutter/bin"
+
+# Build
+cargo build --release
+
+# The binary will be in: target/release/rustdesk
+```
+
+### Building RustDesk API Server from Your Fork
+
+```bash
+# Clone your API server fork
+git clone https://github.com/sgpromantis/rustdesk-api-server.git
+cd rustdesk-api-server
+
+# Build with Docker
+docker build -t sgpromantis/rustdesk-api-server:latest .
+
+# Or build with Python
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Run
+uvicorn main:app --host 0.0.0.0 --port 21114
+```
+
+### Dockerfile for RustDesk Server (if not present)
+
+Create `Dockerfile` in your `rustdesk-server` fork:
+
+```dockerfile
+# Multi-stage build for RustDesk Server
+FROM rust:1.75-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache \
+    musl-dev \
+    openssl-dev \
+    perl \
+    make
+
+WORKDIR /app
+
+# Copy source
+COPY . .
+
+# Build release binaries
+RUN cargo build --release
+
+# Runtime stage
+FROM alpine:latest
+
+# Install runtime dependencies
+RUN apk add --no-cache \
+    ca-certificates \
+    libgcc
+
+# Copy binaries from builder
+COPY --from=builder /app/target/release/hbbs /usr/local/bin/
+COPY --from=builder /app/target/release/hbbr /usr/local/bin/
+
+# Create data directory
+RUN mkdir -p /root
+
+WORKDIR /root
+
+# Expose ports
+EXPOSE 21115 21116 21116/udp 21117 21118 21119
+
+# Default command (override in docker-compose)
+CMD ["hbbs"]
+```
+
+### Keeping Your Forks Updated
+
+Sync your forks with upstream repositories:
+
+```bash
+# Add upstream remote
+cd rustdesk-server
+git remote add upstream https://github.com/rustdesk/rustdesk-server.git
+
+# Fetch upstream changes
+git fetch upstream
+
+# Merge upstream into your fork
+git checkout main
+git merge upstream/main
+
+# Push updates to your fork
+git push origin main
+```
+
+**Automated sync with GitHub Actions** - Create `.github/workflows/sync-fork.yml`:
+
+```yaml
+name: Sync Fork
+
+on:
+  schedule:
+    - cron: '0 0 * * 0'  # Weekly on Sunday
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: tgymnich/fork-sync@v1.9
+        with:
+          owner: sgpromantis
+          base: main
+          head: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+```
+
+### Complete Build and Deploy Workflow
+
+**Full automation script** (`build-deploy.sh`):
+
+```bash
+#!/bin/bash
+set -e
+
+echo "Building RustDesk Server from fork..."
+
+# Configuration
+REPO="sgpromantis/rustdesk-server"
+VERSION=$(date +%Y%m%d-%H%M%S)
+
+# Clone or update
+if [ -d "rustdesk-server" ]; then
+  cd rustdesk-server
+  git pull
+else
+  git clone https://github.com/${REPO}.git
+  cd rustdesk-server
+fi
+
+# Build multi-arch image
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t ${REPO}:latest \
+  -t ${REPO}:${VERSION} \
+  --push .
+
+echo "Build complete: ${REPO}:${VERSION}"
+echo "Watchtower will detect and deploy in ~60 seconds"
+
+# Optional: Trigger immediate Watchtower update
+# ssh root@your-vps "docker exec watchtower watchtower --run-once"
+```
+
+Make executable and run:
+
+```bash
+chmod +x build-deploy.sh
+./build-deploy.sh
+```
+
+### Repository Links Summary
+
+#### Core Repositories (Fork These)
+
+| Component | Original Repository | Your Fork | Priority |
+|-----------|-------------------|-----------|----------|
+| Server | https://github.com/rustdesk/rustdesk-server | https://github.com/sgpromantis/rustdesk-server | **Essential** |
+| Client | https://github.com/rustdesk/rustdesk | https://github.com/sgpromantis/rustdesk | **Essential** |
+| API Server | https://github.com/rustdesk/rustdesk-api-server | https://github.com/sgpromantis/rustdesk-api-server | Optional |
+| Server Pro | https://github.com/rustdesk/rustdesk-server-pro | https://github.com/sgpromantis/rustdesk-server-pro | Optional |
+
+#### Supporting Repositories (Reference Only)
+
+| Component | Repository | Purpose |
+|-----------|-----------|---------|
+| Documentation | https://github.com/rustdesk/doc.rustdesk.com | Official documentation |
+| Website | https://github.com/rustdesk/rustdesk.github.io | Project website |
+| Docker Images | https://hub.docker.com/u/rustdesk | Official Docker images |
+
+#### Related Tools
+
+| Tool | Repository |
+|------|-----------|
+| Traefik | https://github.com/traefik/traefik |
+| Watchtower | https://github.com/containrrr/watchtower |
+| Portainer | https://github.com/portainer/portainer |
+
+---
+
+## Troubleshooting
+
+### tmux Session Issues
+
+#### Session Not Found
+
+```bash
+# If tmux session doesn't exist, create it
+tmux new -s rustdesk-deploy
+
+# Or attach if it exists, create if it doesn't
+tmux new-session -A -s rustdesk-deploy
+```
+
+#### tmux Server Killed/Crashed
+
+```bash
+# Check if tmux server is running
+ps aux | grep tmux
+
+# Restart tmux server (kills all sessions)
+pkill -f tmux
+tmux new -s rustdesk-deploy
+
+# List any remaining sessions
+tmux ls
+```
+
+#### Can't Attach to Session
+
+```bash
+# Force detach all clients from session
+tmux attach -dt rustdesk-deploy
+
+# If still issues, kill and recreate
+tmux kill-session -t rustdesk-deploy
+tmux new -s rustdesk-deploy
+```
+
+#### Save tmux Session Configuration
+
+Create `~/.tmux.conf` for better defaults:
+
+```bash
+cat > ~/.tmux.conf << 'EOF'
+# Enable mouse support
+set -g mouse on
+
+# Increase scrollback buffer
+set -g history-limit 10000
+
+# Start windows and panes at 1, not 0
+set -g base-index 1
+setw -g pane-base-index 1
+
+# Enable vi mode
+setw -g mode-keys vi
+
+# Faster command sequences
+set -s escape-time 0
+
+# Status bar styling
+set -g status-style bg=black,fg=white
+set -g status-left-length 30
+set -g status-left '#[fg=green](#S) '
+set -g status-right '#[fg=yellow]#(whoami)@#h '
+
+# Highlight active window
+setw -g window-status-current-style fg=black,bg=green
+
+# Reload config
+bind r source-file ~/.tmux.conf \; display "Config reloaded!"
+EOF
+
+# Reload tmux config (inside tmux session)
+tmux source-file ~/.tmux.conf
+```
+
+### IONOS VPS Specific Issues
+
+#### Port 80/443 Not Accessible
+
+1. **Check IONOS Cloud Firewall:**
+   - Log into IONOS control panel
+   - Navigate to your VPS → Security → Firewall
+   - Ensure ports 80 and 443 are allowed for inbound traffic
+
+2. **Verify VPS firewall:**
+   ```bash
+   sudo ufw status verbose
+   # or
+   sudo firewall-cmd --list-all
+   ```
+
+3. **Test port accessibility from outside:**
+   ```bash
+   # From another machine
+   telnet your-vps-ip 80
+   telnet your-vps-ip 443
+   ```
+
+#### DNS Not Resolving
+
+1. **Verify DNS propagation:**
+   ```bash
+   # Check if DNS has propagated
+   nslookup traefik.yourdomain.com
+   dig traefik.yourdomain.com
+   
+   # Check from multiple locations
+   https://www.whatsmydns.net/#A/traefik.yourdomain.com
+   ```
+
+2. **IONOS DNS can take 15-30 minutes to propagate**. Be patient after making changes.
+
+3. **Verify DNS settings in IONOS panel:**
+   - Domains & SSL → Your Domain → DNS
+   - Ensure A records are correct
+   - TTL should be set (recommended: 3600 seconds)
+
+#### Let's Encrypt Rate Limits
+
+If you're testing and hit rate limits:
+
+1. **Use Let's Encrypt staging server** during testing by adding to `traefik.yml`:
+   ```yaml
+   certificatesResolvers:
+     letsencrypt:
+       acme:
+         caServer: https://acme-staging-v02.api.letsencrypt.org/directory
+         email: ${ACME_EMAIL}
+         storage: acme.json
+         httpChallenge:
+           entryPoint: http
+   ```
+
+2. **After successful testing**, remove the `caServer` line and delete `acme.json`:
+   ```bash
+   docker-compose down
+   rm traefik/acme.json
+   touch traefik/acme.json
+   chmod 600 traefik/acme.json
+   docker-compose up -d
+   ```
+
+### SSL Certificate Issues
+
+If Let's Encrypt certificates are not being generated:
+
+1. Check Traefik logs:
+   ```bash
+   docker-compose logs traefik | grep -i acme
+   ```
+
+2. Verify DNS is correctly pointing to your server:
+   ```bash
+   nslookup traefik.yourdomain.com
+   ```
+
+3. Ensure ports 80 and 443 are accessible:
+   ```bash
+   curl -I http://yourdomain.com
+   ```
+
+4. Check acme.json permissions:
+   ```bash
+   ls -la traefik/acme.json
+   # Should be: -rw------- (600)
+   ```
+
+### RustDesk Connection Issues
+
+1. Verify RustDesk services are running:
+   ```bash
+   docker-compose ps hbbs hbbr
+   ```
+
+2. Check if ports are listening:
+   ```bash
+   netstat -tuln | grep -E '21115|21116|21117'
+   ```
+
+3. Test connectivity from client:
+   ```bash
+   telnet yourdomain.com 21116
+   ```
+
+4. Check firewall rules:
+   ```bash
+   sudo ufw status
+   # or
+   sudo firewall-cmd --list-all
+   ```
+
+### Watchtower Not Updating
+
+1. Check Watchtower logs:
+   ```bash
+   docker-compose logs watchtower
+   ```
+
+2. Verify labels are set correctly on containers:
+   ```bash
+   docker inspect hbbs | grep -i watchtower
+   ```
+
+3. Manually trigger Watchtower:
+   ```bash
+   docker exec watchtower watchtower --run-once
+   ```
+
+### Custom Repository Issues
+
+#### Image Pull Failures
+
+If Watchtower can't pull from `sgpromantis/rustdesk-server`:
+
+1. **Check if image exists:**
+   ```bash
+   docker pull sgpromantis/rustdesk-server:latest
+   ```
+
+2. **Verify repository is public** or authenticate:
+   ```bash
+   # If private repository, add credentials
+   docker login
+   # Enter your Docker Hub credentials
+   ```
+
+3. **Check Watchtower has access:**
+   ```bash
+   # For private repos, add to docker-compose.yml watchtower service:
+   environment:
+     - REPO_USER=your_dockerhub_username
+     - REPO_PASS=your_dockerhub_password
+   ```
+
+#### Version Mismatch
+
+If containers are running old versions:
+
+1. **Force pull latest image:**
+   ```bash
+   docker-compose pull hbbs hbbr
+   docker-compose up -d
+   ```
+
+2. **Check image digest:**
+   ```bash
+   # On your build machine
+   docker inspect sgpromantis/rustdesk-server:latest | grep Id
+   
+   # On your VPS
+   docker inspect sgpromantis/rustdesk-server:latest | grep Id
+   
+   # Should match!
+   ```
+
+3. **Clear Docker cache if needed:**
+   ```bash
+   docker system prune -a
+   docker-compose pull
+   docker-compose up -d
+   ```
+
+#### Build Issues
+
+If your custom builds aren't working:
+
+1. **Test build locally first:**
+   ```bash
+   docker build -t test-rustdesk .
+   docker run -d --name test test-rustdesk hbbs
+   docker logs test
+   ```
+
+2. **Check for architecture compatibility:**
+   ```bash
+   # Your build machine architecture
+   uname -m
+   
+   # VPS architecture
+   ssh root@vps-ip "uname -m"
+   
+   # Should match (usually x86_64/amd64)
+   ```
+
+3. **Build for multiple architectures if needed:**
+   ```bash
+   # Setup buildx
+   docker buildx create --use
+   
+   # Build for multiple platforms
+   docker buildx build --platform linux/amd64,linux/arm64 \
+     -t sgpromantis/rustdesk-server:latest \
+     --push .
+   ```
+
+### Portainer Access Issues
+
+1. Reset Portainer admin password:
+   ```bash
+   docker stop portainer
+   docker run --rm -v rustdesk-deployment_portainer-data:/data portainer/helper-reset-password
+   docker start portainer
+   ```
+
+### Load Balancing Issues
+
+Check if all replicas are healthy:
+
+```bash
+docker-compose ps
+docker service ls  # If using swarm mode
+```
+
+View load balancer status in Traefik dashboard at `https://traefik.yourdomain.com`
+
+---
+
+## Supporttool Files Appendix
+
+This section contains the complete files for the supporttool service. The service uses `halverneus/static-file-server`, a lightweight Go-based static file server that works perfectly with Traefik (no nginx required).
+
+### Features
+- **Automatic directory listing** for browsing installers
+- **Custom templates** for branded experience
+- **Direct Traefik integration** via labels
+- **Lightweight** (< 10MB Docker image)
+- **Fast** static file serving
+
+### Complete index.html
+
+Save this as `./supporttool/index.html`:
+
+```bash
+cat > supporttool/index.html << 'EOF'
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustDesk Support Tools</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 40px;
+            text-align: center;
+        }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .content { padding: 40px; }
+        .section { margin-bottom: 40px; }
+        .section h2 {
+            color: #667eea;
+            font-size: 1.8em;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+        .download-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .download-card {
+            background: #f8f9fa;
+            border-radius: 8px;
+            padding: 24px;
+            text-align: center;
+            transition: transform 0.3s, box-shadow 0.3s;
+            border: 2px solid transparent;
+        }
+        .download-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
+            border-color: #667eea;
+        }
+        .download-card .icon { font-size: 3em; margin-bottom: 15px; }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 6px;
+            font-weight: 600;
+            transition: transform 0.2s;
+            margin-top: 10px;
+        }
+        .btn:hover { transform: scale(1.05); }
+        .info-box {
+            background: #e7f3ff;
+            border-left: 4px solid #667eea;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 4px;
+        }
+        .info-box code {
+            background: white;
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-family: monospace;
+        }
+        pre {
+            background: #2d2d2d;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 6px;
+            overflow-x: auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖥️ RustDesk Support Tools</h1>
+            <p>Custom RustDesk Client Installers & Configuration Scripts</p>
+        </div>
+        <div class="content">
+            <div class="section">
+                <h2>🚀 Quick Install</h2>
+                <div class="info-box">
+                    <h3>Linux/macOS</h3>
+                    <pre>curl -sSL https://supporttool.yourdomain.com/scripts/install.sh | bash</pre>
+                </div>
+                <div class="info-box">
+                    <h3>Windows PowerShell</h3>
+                    <pre>iwr -useb https://supporttool.yourdomain.com/scripts/install.ps1 | iex</pre>
+                </div>
+            </div>
+            <div class="section">
+                <h2>📥 Download Installers</h2>
+                <div class="download-grid">
+                    <div class="download-card">
+                        <div class="icon">🪟</div>
+                        <h3>Windows</h3>
+                        <a href="/installers/windows/" class="btn">Browse</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">🐧</div>
+                        <h3>Linux</h3>
+                        <a href="/installers/linux/" class="btn">Browse</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">🍎</div>
+                        <h3>macOS</h3>
+                        <a href="/installers/macos/" class="btn">Browse</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">📱</div>
+                        <h3>Android</h3>
+                        <a href="/installers/android/" class="btn">Browse</a>
+                    </div>
+                </div>
+            </div>
+            <div class="section">
+                <h2>📜 Scripts & Configuration</h2>
+                <div class="download-grid">
+                    <div class="download-card">
+                        <div class="icon">🐚</div>
+                        <h3>Bash Script</h3>
+                        <a href="/scripts/install.sh" class="btn" download>Download</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">💻</div>
+                        <h3>PowerShell</h3>
+                        <a href="/scripts/install.ps1" class="btn" download>Download</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">⚙️</div>
+                        <h3>Configuration</h3>
+                        <a href="/scripts/config.json" class="btn" download>Download</a>
+                    </div>
+                    <div class="download-card">
+                        <div class="icon">📂</div>
+                        <h3>All Scripts</h3>
+                        <a href="/scripts/" class="btn">Browse</a>
+                    </div>
+                </div>
+            </div>
+            <div class="section">
+                <h2>🌐 Server Configuration</h2>
+                <div class="info-box">
+                    <p><strong>ID Server:</strong> <code>yourdomain.com:21116</code></p>
+                    <p><strong>Relay Server:</strong> <code>yourdomain.com:21117</code></p>
+                    <p style="margin-top: 10px;"><em>Pre-configured in all installers above</em></p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
+EOF
+```
+
+### Installation Scripts
+
+#### install.sh (Linux/macOS)
+
+Save this as `./supporttool/scripts/install.sh`:
+
+```bash
+#!/bin/bash
+set -e
+
+RUSTDESK_SERVER="yourdomain.com"
+RUSTDESK_ID_SERVER="${RUSTDESK_SERVER}:21116"
+RUSTDESK_RELAY_SERVER="${RUSTDESK_SERVER}:21117"
+RUSTDESK_KEY="YOUR_PUBLIC_KEY_HERE"
+
+echo "Installing RustDesk..."
+
+# Detect OS
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    if [ -f /etc/debian_version ]; then
+        wget -O /tmp/rustdesk.deb "https://supporttool.${RUSTDESK_SERVER}/installers/linux/rustdesk-amd64.deb"
+        sudo dpkg -i /tmp/rustdesk.deb || sudo apt-get install -f -y
+    elif [ -f /etc/redhat-release ]; then
+        wget -O /tmp/rustdesk.rpm "https://supporttool.${RUSTDESK_SERVER}/installers/linux/rustdesk-x86_64.rpm"
+        sudo rpm -i /tmp/rustdesk.rpm
+    fi
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+    curl -L -o /tmp/rustdesk.dmg "https://supporttool.${RUSTDESK_SERVER}/installers/macos/rustdesk.dmg"
+    hdiutil attach /tmp/rustdesk.dmg
+    cp -R /Volumes/RustDesk/RustDesk.app /Applications/
+    hdiutil detach /Volumes/RustDesk
+fi
+
+# Configure
+CONFIG_DIR="$HOME/.config/rustdesk"
+[ "$OSTYPE" == "darwin"* ] && CONFIG_DIR="$HOME/Library/Preferences/com.carriez.rustdesk"
+mkdir -p "$CONFIG_DIR"
+
+cat > "$CONFIG_DIR/RustDesk2.toml" <<EOF
+[options]
+custom-rendezvous-server = "${RUSTDESK_ID_SERVER}"
+relay-server = "${RUSTDESK_RELAY_SERVER}"
+key = "${RUSTDESK_KEY}"
+EOF
+
+echo "Installation complete! Server: ${RUSTDESK_SERVER}"
+```
+
+#### install.ps1 (Windows)
+
+Save this as `./supporttool/scripts/install.ps1`:
+
+```powershell
+$RUSTDESK_SERVER = "yourdomain.com"
+$RUSTDESK_ID_SERVER = "${RUSTDESK_SERVER}:21116"
+$RUSTDESK_RELAY_SERVER = "${RUSTDESK_SERVER}:21117"
+$RUSTDESK_KEY = "YOUR_PUBLIC_KEY_HERE"
+
+Write-Host "Installing RustDesk..." -ForegroundColor Green
+
+$installerUrl = "https://supporttool.${RUSTDESK_SERVER}/installers/windows/rustdesk-setup.exe"
+$installerPath = "$env:TEMP\rustdesk-setup.exe"
+
+Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath
+Start-Process -FilePath $installerPath -ArgumentList "/VERYSILENT" -Wait
+
+$configDir = "$env:APPDATA\RustDesk\config"
+New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+
+@"
+[options]
+custom-rendezvous-server = "${RUSTDESK_ID_SERVER}"
+relay-server = "${RUSTDESK_RELAY_SERVER}"
+key = "${RUSTDESK_KEY}"
+"@ | Out-File -FilePath "$configDir\RustDesk2.toml" -Encoding UTF8
+
+Write-Host "Installation complete! Server: $RUSTDESK_SERVER" -ForegroundColor Green
+```
+
+#### config.json
+
+Save this as `./supporttool/scripts/config.json`:
+
+```json
+{
+  "server": {
+    "domain": "yourdomain.com",
+    "id_server": "yourdomain.com:21116",
+    "relay_server": "yourdomain.com:21117",
+    "api_server": "https://yourdomain.com"
+  },
+  "security": {
+    "key": "YOUR_PUBLIC_KEY_HERE"
+  },
+  "options": {
+    "enable_keyboard": true,
+    "enable_clipboard": true,
+    "enable_file_transfer": true,
+    "enable_audio": true
+  }
+}
+```
+
+### Setup Instructions for Supporttool
+
+1. **Create directory structure:**
+```bash
+mkdir -p supporttool/installers/{windows,linux,macos,android}
+mkdir -p supporttool/scripts
+```
+
+2. **Create configuration files** using the templates above (index.html, install.sh, install.ps1, config.json)
+
+3. **Upload your custom RustDesk installers** to the appropriate directories:
+   - Windows: `supporttool/installers/windows/rustdesk-setup.exe`
+   - Linux DEB: `supporttool/installers/linux/rustdesk-amd64.deb`
+   - Linux RPM: `supporttool/installers/linux/rustdesk-x86_64.rpm`
+   - macOS: `supporttool/installers/macos/rustdesk.dmg`
+   - Android: `supporttool/installers/android/rustdesk.apk`
+
+4. **Make scripts executable:**
+```bash
+chmod +x supporttool/scripts/install.sh
+```
+
+5. **Update placeholders** in all files:
+   - Replace `yourdomain.com` with your actual domain
+   - Replace `YOUR_PUBLIC_KEY_HERE` with your RustDesk public key from `./data/id_ed25519.pub`
+
+6. **Add DNS record** for `supporttool.yourdomain.com` pointing to your VPS IP
+
+7. **Restart services:**
+```bash
+docker-compose up -d
+```
+
+Your support tool will be available at `https://supporttool.yourdomain.com`
+
+**Note:** The supporttool uses `halverneus/static-file-server` which provides automatic directory listings and works seamlessly with Traefik. No nginx configuration needed!
+
+---
+
+## Advanced Configuration
+
+### Enable Swarm Mode (Optional)
+
+For true high availability with replicas:
+
+```bash
+# Initialize swarm
+docker swarm init
+
+# Deploy stack
+docker stack deploy -c docker-compose.yml rustdesk
+```
+
+### Custom Middleware
+
+Add custom middleware in `config.yml` for:
+- IP whitelisting
+- Custom headers
+- Circuit breakers
+- Retry logic
+
+### Monitoring
+
+Add Prometheus and Grafana for monitoring:
+
+```yaml
+# Add to docker-compose.yml
+prometheus:
+  image: prom/prometheus:latest
+  volumes:
+    - ./prometheus.yml:/etc/prometheus/prometheus.yml
+  networks:
+    - proxy
+
+grafana:
+  image: grafana/grafana:latest
+  networks:
+    - proxy
+  labels:
+    - "traefik.enable=true"
+    - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN}`)"
+```
+
+---
+
+## Security Recommendations
+
+1. **Change default passwords** immediately
+2. **Enable fail2ban** for brute force protection
+3. **Keep containers updated** (Watchtower handles this)
+4. **Use strong authentication** for all services
+5. **Regularly backup** configuration and data
+6. **Monitor logs** for suspicious activity
+7. **Restrict network access** to necessary ports only
+8. **Enable HSTS** (already configured in headers)
+9. **Use firewall rules** to limit access by IP if possible
+
+---
+
+## References
+
+- [sgpromantis/rustdesk-server (Custom Repository)](https://github.com/sgpromantis/rustdesk-server)
+- [RustDesk Official Documentation](https://rustdesk.com/docs/)
+- [RustDesk Official Repository](https://github.com/rustdesk/rustdesk)
+- [Traefik Documentation](https://doc.traefik.io/traefik/)
+- [Portainer Documentation](https://docs.portainer.io/)
+- [Watchtower Documentation](https://containrrr.dev/watchtower/)
+- [Let's Encrypt Documentation](https://letsencrypt.org/docs/)
+- [Docker Hub - Building Images](https://docs.docker.com/docker-hub/builds/)
+
+---
+
+## License
+
+This configuration is provided as-is for educational and deployment purposes.
+
+---
+
+## Support
+
+For issues related to:
+- **IONOS VPS**: Visit [IONOS Support](https://www.ionos.com/help) or contact support
+- **RustDesk**: Visit [RustDesk GitHub](https://github.com/rustdesk/rustdesk)
+- **Traefik**: Visit [Traefik Community](https://community.traefik.io/)
+- **Docker**: Visit [Docker Forums](https://forums.docker.com/)
+
+---
+
+**Configuration Type**: IONOS VPS with Let's Encrypt HTTP Challenge  
+**Custom Image**: sgpromantis/rustdesk-server:latest  
+**Last Updated**: February 2026  
+**Tested On**: IONOS VPS M, Ubuntu 22.04 LTS
